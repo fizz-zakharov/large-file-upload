@@ -1,6 +1,8 @@
 import express from "express";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
+import unzipper from "unzipper";
 import { fileURLToPath } from "url";
 import { Upload } from "../models/upload.model.js";
 import { Chunk } from "../models/chunk.model.js";
@@ -123,5 +125,80 @@ router.post("/:uploadId/chunk", async (req, res) => {
     return res.status(500).json({ message: "Internal server error" });
   }
 });
+
+/**
+ * POST /uploads/:uploadId/finalize
+ * Finalizes upload: verifies chunks, hashes file, peeks ZIP, marks completed
+ */
+router.post("/:uploadId/finalize", async (req, res) => {
+  try {
+    const { uploadId } = req.params;
+
+    // 1. Fetch upload
+    const upload = await Upload.findById(uploadId);
+    if (!upload) {
+      return res.status(404).json({ message: "Upload not found" });
+    }
+
+    // 2. Prevent double finalization
+    if (upload.status === "COMPLETED") {
+      return res.json({
+        message: "Upload already finalized",
+        finalHash: upload.finalHash,
+      });
+    }
+
+    // 3. Check if all chunks are uploaded
+    const chunkCount = await Chunk.countDocuments({ uploadId });
+    if (chunkCount !== upload.totalChunks) {
+      return res.status(400).json({
+        message: "Upload incomplete",
+        uploadedChunks: chunkCount,
+        totalChunks: upload.totalChunks,
+      });
+    }
+
+    const filePath = path.join(process.cwd(), "uploads", `${uploadId}.bin`);
+
+    // 4. Calculate SHA-256 hash (STREAMING)
+    const hash = crypto.createHash("sha256");
+    await new Promise((resolve, reject) => {
+      fs.createReadStream(filePath)
+        .on("data", (data) => hash.update(data))
+        .on("end", resolve)
+        .on("error", reject);
+    });
+
+    const finalHash = hash.digest("hex");
+
+    // 5. Peek ZIP contents (STREAMING, NO EXTRACTION)
+    const zipEntries = [];
+
+    await fs
+      .createReadStream(filePath)
+      .pipe(unzipper.Parse())
+      .on("entry", (entry) => {
+        zipEntries.push(entry.path);
+        entry.autodrain(); // important: do not extract
+      })
+      .promise();
+
+    // 6. Mark upload completed
+    upload.status = "COMPLETED";
+    upload.finalHash = finalHash;
+    await upload.save();
+
+    // 7. Respond
+    return res.json({
+      message: "Upload finalized successfully",
+      finalHash,
+      filesInZip: zipEntries,
+    });
+  } catch (error) {
+    console.error("Finalize error:", error);
+    return res.status(500).json({ message: "Finalization failed" });
+  }
+});
+
 
 export default router;
