@@ -89,7 +89,7 @@ router.post("/:uploadId/chunk", async (req, res) => {
       fs.mkdirSync(uploadsDir);
     }
 
-    // ✅ CRITICAL FIX: Ensure file exists before r+ write
+    // CRITICAL FIX: Ensure file exists before r+ write
     if (!fs.existsSync(filePath)) {
       fs.closeSync(fs.openSync(filePath, "w"));
     }
@@ -134,13 +134,12 @@ router.post("/:uploadId/finalize", async (req, res) => {
   try {
     const { uploadId } = req.params;
 
-    // 1. Fetch upload
     const upload = await Upload.findById(uploadId);
     if (!upload) {
       return res.status(404).json({ message: "Upload not found" });
     }
 
-    // 2. Prevent double finalization
+    // Prevent double finalize
     if (upload.status === "COMPLETED") {
       return res.json({
         message: "Upload already finalized",
@@ -148,7 +147,7 @@ router.post("/:uploadId/finalize", async (req, res) => {
       });
     }
 
-    // 3. Check if all chunks are uploaded
+    // Ensure all chunks uploaded
     const chunkCount = await Chunk.countDocuments({ uploadId });
     if (chunkCount !== upload.totalChunks) {
       return res.status(400).json({
@@ -158,47 +157,56 @@ router.post("/:uploadId/finalize", async (req, res) => {
       });
     }
 
-    const filePath = path.join(process.cwd(), "uploads", `${uploadId}.bin`);
+    const filePath = path.join(
+      process.cwd(),
+      "uploads",
+      `${uploadId}.bin`
+    );
 
-    // 4. Calculate SHA-256 hash (STREAMING)
+    // ---- SHA-256 HASH (REQUIRED) ----
     const hash = crypto.createHash("sha256");
     await new Promise((resolve, reject) => {
       fs.createReadStream(filePath)
-        .on("data", (data) => hash.update(data))
+        .on("data", (d) => hash.update(d))
         .on("end", resolve)
         .on("error", reject);
     });
-
     const finalHash = hash.digest("hex");
 
-    // 5. Peek ZIP contents (STREAMING, NO EXTRACTION)
-    const zipEntries = [];
+    // ---- ZIP PEEK (OPTIONAL, MUST NEVER FAIL) ----
+    let zipEntries = [];
+    try {
+      await fs
+        .createReadStream(filePath)
+        .pipe(unzipper.Parse())
+        .on("entry", (entry) => {
+          zipEntries.push(entry.path);
+          entry.autodrain();
+        })
+        .promise();
+    } catch (zipErr) {
+      console.warn(
+        "ZIP peek skipped (not a valid ZIP or incomplete ZIP):",
+        zipErr.message
+      );
+    }
 
-    await fs
-      .createReadStream(filePath)
-      .pipe(unzipper.Parse())
-      .on("entry", (entry) => {
-        zipEntries.push(entry.path);
-        entry.autodrain(); // important: do not extract
-      })
-      .promise();
-
-    // 6. Mark upload completed
+    // ---- MARK COMPLETED ----
     upload.status = "COMPLETED";
     upload.finalHash = finalHash;
     await upload.save();
 
-    // 7. Respond
     return res.json({
       message: "Upload finalized successfully",
       finalHash,
       filesInZip: zipEntries,
     });
-  } catch (error) {
-    console.error("Finalize error:", error);
+  } catch (err) {
+    console.error("Finalize error (unexpected):", err);
     return res.status(500).json({ message: "Finalization failed" });
   }
 });
+
 
 
 export default router;
