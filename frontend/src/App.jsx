@@ -11,33 +11,35 @@ function App() {
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState(0);
 
-  // Split file into chunks
+  // Chunk status tracking
+  const [chunkStatus, setChunkStatus] = useState({});
+
+  // Metrics
+  const [uploadedBytes, setUploadedBytes] = useState(0);
+  const [startTime, setStartTime] = useState(null);
+
   const createChunks = (file) => {
     const chunksArray = [];
     let index = 0;
 
     while (index * CHUNK_SIZE < file.size) {
-      const start = index * CHUNK_SIZE;
-      const end = start + CHUNK_SIZE;
-
       chunksArray.push({
         index,
-        blob: file.slice(start, end),
+        blob: file.slice(
+          index * CHUNK_SIZE,
+          index * CHUNK_SIZE + CHUNK_SIZE
+        ),
       });
-
       index++;
     }
 
     return chunksArray;
   };
 
-  // Handshake with backend
   const initUpload = async (selectedFile) => {
     const res = await fetch("http://localhost:4000/uploads/init", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         filename: selectedFile.name,
         totalSize: selectedFile.size,
@@ -46,132 +48,158 @@ function App() {
     });
 
     const data = await res.json();
-
     setUploadId(data.uploadId);
     setUploadedChunks(data.uploadedChunks);
 
-    // Start upload automatically (temporary)
-    setTimeout(() => startUpload(data.uploadId, data.uploadedChunks), 0);
+    // mark already uploaded chunks
+    const statusMap = {};
+    data.uploadedChunks.forEach((i) => (statusMap[i] = "success"));
+    setChunkStatus(statusMap);
   };
 
-  // Upload a single chunk with retry
-  const uploadChunk = async (uploadId, chunkObj, retryCount = 0) => {
+  const uploadChunk = async (uploadId, chunkObj, retry = 0) => {
     const { index, blob } = chunkObj;
+
+    setChunkStatus((s) => ({ ...s, [index]: "uploading" }));
 
     try {
       const res = await fetch(
         `http://localhost:4000/uploads/${uploadId}/chunk?chunkIndex=${index}`,
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/octet-stream",
-          },
+          headers: { "Content-Type": "application/octet-stream" },
           body: blob,
         }
       );
 
-      if (!res.ok) {
-        throw new Error("Chunk upload failed");
-      }
+      if (!res.ok) throw new Error();
 
-      return true;
-    } catch (err) {
-      if (retryCount < 3) {
-        const delay = Math.pow(2, retryCount) * 500;
-        await new Promise((r) => setTimeout(r, delay));
-        return uploadChunk(uploadId, chunkObj, retryCount + 1);
+      setChunkStatus((s) => ({ ...s, [index]: "success" }));
+      setUploadedBytes((b) => b + blob.size);
+    } catch {
+      if (retry < 3) {
+        await new Promise((r) =>
+          setTimeout(r, Math.pow(2, retry) * 500)
+        );
+        return uploadChunk(uploadId, chunkObj, retry + 1);
       }
-      throw err;
+      setChunkStatus((s) => ({ ...s, [index]: "error" }));
     }
   };
 
-  // Upload chunks with concurrency limit
-  const uploadChunksWithLimit = async (
-    uploadId,
-    pendingChunks,
-    limit = 3
-  ) => {
+  const uploadChunksWithLimit = async (pending, limit = 3) => {
     let completed = 0;
-    const total = pendingChunks.length;
+    const total = pending.length;
+    const queue = [...pending];
 
-    const queue = [...pendingChunks];
-    const workers = [];
-
-    const runWorker = async () => {
+    const worker = async () => {
       while (queue.length) {
         const chunk = queue.shift();
         await uploadChunk(uploadId, chunk);
-
         completed++;
         setProgress(Math.round((completed / total) * 100));
       }
     };
 
-    for (let i = 0; i < limit; i++) {
-      workers.push(runWorker());
-    }
-
-    await Promise.all(workers);
+    await Promise.all(
+      Array.from({ length: limit }, worker)
+    );
   };
 
-  // Start upload
-  const startUpload = async (uploadId, alreadyUploaded) => {
-    if (!uploadId) return;
+  const finalizeUpload = async () => {
+    await fetch(
+      `http://localhost:4000/uploads/${uploadId}/finalize`,
+      { method: "POST" }
+    );
+  };
 
+  const startUpload = async () => {
     setUploading(true);
-    setProgress(0);
+    setStartTime(Date.now());
+    setUploadedBytes(0);
 
-    const pendingChunks = chunks.filter(
-      (c) => !alreadyUploaded.includes(c.index)
+    const pending = chunks.filter(
+      (c) => !uploadedChunks.includes(c.index)
     );
 
-    await uploadChunksWithLimit(uploadId, pendingChunks, 3);
-
+    await uploadChunksWithLimit(pending);
     setUploading(false);
-    console.log("All chunks uploaded");
+    await finalizeUpload();
   };
 
-  // Handle file selection
   const handleFileChange = (e) => {
-    const selectedFile = e.target.files[0];
-    if (!selectedFile) return;
+    const selected = e.target.files[0];
+    if (!selected) return;
 
-    setFile(selectedFile);
-
-    const createdChunks = createChunks(selectedFile);
-    setChunks(createdChunks);
-
-    console.log("File:", selectedFile.name);
-    console.log("Total size:", selectedFile.size);
-    console.log("Total chunks:", createdChunks.length);
-
-    initUpload(selectedFile);
+    setFile(selected);
+    setChunks(createChunks(selected));
+    setChunkStatus({});
+    initUpload(selected);
   };
+
+  const elapsedSeconds = startTime
+    ? (Date.now() - startTime) / 1000
+    : 0;
+
+  const speedMBps =
+    elapsedSeconds > 0
+      ? uploadedBytes / 1024 / 1024 / elapsedSeconds
+      : 0;
+
+  const remainingBytes = file
+    ? file.size - uploadedBytes
+    : 0;
+
+  const etaSeconds =
+    speedMBps > 0
+      ? remainingBytes / 1024 / 1024 / speedMBps
+      : 0;
 
   return (
-    <div style={{ padding: 20 }}>
-      <h2>Large File Upload</h2>
+    <div
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        justifyContent: "center",
+        alignItems: "center",
+      }}
+    >
+      <div style={{ width: 600 }}>
+        <h2>Large File Upload</h2>
 
-      <input type="file" onChange={handleFileChange} />
+        <input type="file" onChange={handleFileChange} />
 
-      {file && (
-        <div style={{ marginTop: 12 }}>
-          <p>
-            <strong>File:</strong> {file.name}
-          </p>
-          <p>
-            <strong>Size:</strong>{" "}
-            {(file.size / 1024 / 1024).toFixed(2)} MB
-          </p>
-          <p>
-            <strong>Total Chunks:</strong> {chunks.length}
-          </p>
-          <p>
-            <strong>Progress:</strong> {progress}%
-          </p>
-          {uploading && <p>Uploading…</p>}
-        </div>
-      )}
+        {file && (
+          <>
+            <p>File: {file.name}</p>
+            <p>Progress: {progress}%</p>
+
+            {uploading && (
+              <>
+                <p>Speed: {speedMBps.toFixed(2)} MB/s</p>
+                <p>ETA: {Math.ceil(etaSeconds)} seconds</p>
+              </>
+            )}
+
+            <button
+              onClick={startUpload}
+              disabled={uploading || !uploadId}
+            >
+              {uploading ? "Uploading..." : "Upload"}
+            </button>
+
+            <h4>Chunk Status</h4>
+            <div style={{ maxHeight: 200, overflowY: "auto" }}>
+              {chunks.map((c) => (
+                <div key={c.index}>
+                  Chunk {c.index}:{" "}
+                  {chunkStatus[c.index] || "pending"}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
