@@ -1,43 +1,33 @@
-Large File Upload System (Resumable)
+# Large File Upload System (Resumable)
 
 This project implements a resumable large file upload system using a Node.js backend, MongoDB, and a React frontend.
 
-The goal was to support uploading large files reliably by splitting them into chunks, allowing uploads to resume after refreshes, failures, or backend restarts.
+The system allows large files to be uploaded reliably by splitting them into fixed-size chunks and storing upload state in the database. Uploads can be resumed after refreshes, network failures, or backend restarts.
 
-Features
+---
 
-Upload large files by splitting them into fixed-size chunks (5MB)
+## Features
 
-Resume uploads after page refresh or network failure
+- Chunk-based upload (5MB chunks)
+- Resume uploads after interruption
+- Skip already uploaded chunks
+- Support out-of-order chunk uploads
+- Stream file data to disk (no full file buffering)
+- Frontend progress tracking
+- Final upload verification using SHA-256 hashing
+- Optional ZIP content inspection
+- MongoDB-backed upload state for crash recovery
 
-Upload chunks out of order
+---
 
-Avoid re-uploading already uploaded chunks
+## Tech Stack
 
-Stream file data to disk (no full file in memory)
+Backend:
+- Node.js
+- Express
+- MongoDB (Docker)
+- Mongoose
 
-Track upload progress on the frontend
-
-Finalize uploads with SHA-256 hash verification
-
-Safely inspect ZIP contents (if applicable)
-
-MongoDB-backed state for crash recovery
-
-Tech Stack
-
-Backend
-
-Node.js
-
-Express
-
-MongoDB (via Docker)
-
-Mongoose
-
-Frontend
-
-React (Vite)
-
-Fetch API
+Frontend:
+- React (Vite)
+- Fetch API
